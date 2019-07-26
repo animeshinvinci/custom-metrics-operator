@@ -88,7 +88,6 @@ func NewController(
 			}
 			controller.enqueueServiceMonitor(new)
 		},
-		DeleteFunc: controller.enqueueServiceMonitor,
 	})
 
 	return controller
@@ -247,5 +246,16 @@ func (c *Controller) enqueueServiceMonitor(obj interface{}) {
 		utilruntime.HandleError(err)
 		return
 	}
+
+	// No need to enqueue ServiceMonitor resources from IgnoreNamespaces
+	namespace, _, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	if util.ContainsString(c.config.IgnoredNamespaces, namespace) {
+		return
+	}
+
 	c.workqueue.Add(key)
 }
