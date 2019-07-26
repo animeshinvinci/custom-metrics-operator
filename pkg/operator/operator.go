@@ -22,6 +22,7 @@ import (
 	informers "github.com/coreos/prometheus-operator/pkg/client/informers/externalversions/monitoring/v1"
 	listers "github.com/coreos/prometheus-operator/pkg/client/listers/monitoring/v1"
 	clientset "github.com/coreos/prometheus-operator/pkg/client/versioned"
+	"github.com/custom-metrics-operator/pkg/util"
 	"k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -32,9 +33,11 @@ import (
 	"k8s.io/klog"
 )
 
-// Controller is the controller implementation for ServiceMonitor resources
+const ServiceMonitorFinalizer = "finalizers.kubesphere.io/servicemonitors"
+
+// Controller is the controller implementation for ServiceMonitor resources.
 type Controller struct {
-	// sampleclientset is a clientset for our own API group
+	// monitclientset is a clientset for our own API group
 	monitclientset clientset.Interface
 
 	smonsLister listers.ServiceMonitorLister
@@ -57,7 +60,7 @@ type Config struct {
 	TargetLabelKey            string
 }
 
-// NewController returns a new custom metrics operator
+// NewController returns a new custom metrics operator.
 func NewController(
 	monitclientset clientset.Interface,
 	smonInformer informers.ServiceMonitorInformer,
@@ -198,17 +201,38 @@ func (c *Controller) syncHandler(key string) error {
 	// Get the ServiceMonitor resource with this namespace/name
 	smon, err := c.smonsLister.ServiceMonitors(namespace).Get(name)
 	// The ServiceMonitor resource may no longer exist, in which case we remove it from Prometheus.
-	if errors.IsNotFound(err) {
-		// TODO: add business logic here
-		klog.Infof("Delete ServiceMonitor: %s/%s", namespace, name)
-		return nil
-	}
 	if err != nil {
+		// The ServiceMonitor resource may no longer exist, in which case we stop processing.
+		if errors.IsNotFound(err) {
+			utilruntime.HandleError(fmt.Errorf("servicemonitor '%s' in work queue no longer exists", key))
+			return nil
+		}
+
 		return err
 	}
 
 	// TODO: add business logic here
-	klog.Infof("Update ServiceMonitor: %s/%s", smon.Namespace, smon.Name)
+
+	// Use finalizers to implement asynchronous pre-delete hooks
+	if smon.ObjectMeta.DeletionTimestamp.IsZero() {
+		// The object is not being deleted, so if it does not have our finalizer,
+		// then lets add the finalizer and update the object.
+		if !util.ContainsString(smon.ObjectMeta.Finalizers, ServiceMonitorFinalizer) {
+			smon.ObjectMeta.Finalizers = append(smon.ObjectMeta.Finalizers, ServiceMonitorFinalizer)
+			if _, err := c.monitclientset.MonitoringV1().ServiceMonitors(namespace).Update(smon); err != nil {
+				return err
+			}
+		}
+	} else {
+		// The object is being deleted
+		if util.ContainsString(smon.ObjectMeta.Finalizers, ServiceMonitorFinalizer) {
+			// remove our finalizer from the list and update it.
+			smon.ObjectMeta.Finalizers = util.RemoveString(smon.ObjectMeta.Finalizers, ServiceMonitorFinalizer)
+			if _, err := c.monitclientset.MonitoringV1().ServiceMonitors(namespace).Update(smon); err != nil {
+				return err
+			}
+		}
+	}
 
 	return nil
 }
