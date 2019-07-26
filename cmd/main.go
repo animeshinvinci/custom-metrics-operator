@@ -18,6 +18,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -32,13 +35,42 @@ import (
 )
 
 var (
-	masterURL  string
-	kubeconfig string
+	ignoredNs ignoreNamespaces
 )
 
-func main() {
+type ignoreNamespaces []string
+
+// Set implements the flagset.Value interface.
+func (i *ignoreNamespaces) Set(value string) error {
+	ignoredNs = strings.Split(value, ",")
+	return nil
+}
+
+// String implements the flagset.Value interface.
+func (i *ignoreNamespaces) String() string {
+	return fmt.Sprintf("%v", *i)
+}
+
+var (
+	kubeconfig  string
+	masterURL   string
+	operatorCfg operator.Config
+)
+
+func init() {
+	flagset := flag.CommandLine
+	flagset.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
+	flagset.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	flagset.StringVar(&operatorCfg.TargetPrometheus, "target-prometheus", "k8s-system", "The name of Prometheus resource to which ServiceMonitor resources are bound.")
+	flagset.StringVar(&operatorCfg.TargetPrometheusNamespace, "target-prometheus-operator", "kubesphere-monitoring-system", "The namespace of Prometheus resource.")
+	flagset.Var(&ignoredNs, "ignored-namespaces", "Ignore ServiceMonitor resources in specified namespaces.")
+	flagset.StringVar(&operatorCfg.TargetLabelKey, "target-label-key", "k8s-app", "The label key that must match the field serviceMonitorSelector of Prometheus resources.")
+	flagset.Parse(os.Args[1:])
+	operatorCfg.IgnoredNamespaces = ignoredNs
+}
+
+func Main() int {
 	klog.InitFlags(nil)
-	flag.Parse()
 
 	// set up signals so we handle the first shutdown signal gracefully
 	stopCh := signals.SetupSignalHandler()
@@ -46,16 +78,18 @@ func main() {
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
+		return 1
 	}
 
 	monitClient, err := clientset.NewForConfig(cfg)
 	if err != nil {
 		klog.Fatalf("Error building monitoring clientset: %s", err.Error())
+		return 1
 	}
 
-	monitInformerFactory := informers.NewSharedInformerFactory(monitClient, time.Second*30)
+	monitInformerFactory := informers.NewSharedInformerFactory(monitClient, time.Minute*30)
 
-	controller := operator.NewController(monitClient, monitInformerFactory.Monitoring().V1().ServiceMonitors(), operator.Config{})
+	controller := operator.NewController(monitClient, monitInformerFactory.Monitoring().V1().ServiceMonitors(), operatorCfg)
 
 	// notice that there is no need to run Start methods in a separate goroutine. (i.e. go kubeInformerFactory.Start(stopCh)
 	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.
@@ -63,10 +97,12 @@ func main() {
 
 	if err = controller.Run(2, stopCh); err != nil {
 		klog.Fatalf("Error running controller: %s", err.Error())
+		return 1
 	}
+
+	return 0
 }
 
-func init() {
-	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
-	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+func main() {
+	os.Exit(Main())
 }

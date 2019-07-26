@@ -51,6 +51,10 @@ type Controller struct {
 
 // Config defines configuration parameters for the Operator.
 type Config struct {
+	TargetPrometheus          string
+	TargetPrometheusNamespace string
+	IgnoredNamespaces         []string
+	TargetLabelKey            string
 }
 
 // NewController returns a new custom metrics operator
@@ -196,13 +200,15 @@ func (c *Controller) syncHandler(key string) error {
 	// The ServiceMonitor resource may no longer exist, in which case we remove it from Prometheus.
 	if errors.IsNotFound(err) {
 		// TODO: add business logic here
+		klog.Infof("Delete ServiceMonitor: %s/%s", namespace, name)
+		return nil
 	}
 	if err != nil {
 		return err
 	}
 
 	// TODO: add business logic here
-	klog.Infof("ServiceMonitor: %s/%s", smon.Namespace, smon.Name)
+	klog.Infof("Update ServiceMonitor: %s/%s", smon.Namespace, smon.Name)
 
 	return nil
 }
