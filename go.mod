@@ -6,6 +6,7 @@ require (
 	github.com/coreos/prometheus-operator v0.27.0
 	github.com/go-openapi/spec v0.19.2 // indirect
 	github.com/gogo/protobuf v1.2.1 // indirect
+	github.com/golang/groupcache v0.0.0-20190702054246-869f871628b6 // indirect
 	github.com/golang/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.0.0 // indirect
 	github.com/googleapis/gnostic v0.3.0 // indirect

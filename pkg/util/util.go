@@ -19,3 +19,12 @@ func RemoveString(slice []string, s string) (result []string) {
 	}
 	return
 }
+
+func AppendIfUnique(slice []string, s string) []string {
+	for _, item := range slice {
+		if item == s {
+			return slice
+		}
+	}
+	return append(slice, s)
+}

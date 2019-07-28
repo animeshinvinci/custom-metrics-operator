@@ -17,20 +17,23 @@ limitations under the License.
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	informers "github.com/coreos/prometheus-operator/pkg/client/informers/externalversions/monitoring/v1"
 	listers "github.com/coreos/prometheus-operator/pkg/client/listers/monitoring/v1"
 	clientset "github.com/coreos/prometheus-operator/pkg/client/versioned"
-	"github.com/custom-metrics-operator/pkg/util"
+	"github.com/huanggze/custom-metrics-operator/pkg/util"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"time"
-
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
+	"reflect"
+	"time"
 )
 
 const ServiceMonitorFinalizer = "finalizers.kubesphere.io/servicemonitors"
@@ -41,9 +44,11 @@ type Controller struct {
 	monitclientset clientset.Interface
 
 	smonsLister listers.ServiceMonitorLister
+	promsLister listers.PrometheusLister
 	smonsSynced cache.InformerSynced
+	promsSynced cache.InformerSynced
 
-	config Config
+	cfg Config
 	// workqueue is a rate limited work queue. This is used to queue work to be
 	// processed instead of performing it as soon as a change happens. This
 	// means we can ensure we only process a fixed amount of resources at a
@@ -54,23 +59,27 @@ type Controller struct {
 
 // Config defines configuration parameters for the Operator.
 type Config struct {
-	TargetPrometheus          string
-	TargetPrometheusNamespace string
-	IgnoredNamespaces         []string
-	TargetLabelKey            string
+	Prometheus                   string
+	PrometheusNamespace          string
+	IgnoredNamespaces            []string
+	ServiceMonitorLabel          string
+	ServiceMonitorNamespaceLabel string
 }
 
 // NewController returns a new custom metrics operator.
 func NewController(
 	monitclientset clientset.Interface,
 	smonInformer informers.ServiceMonitorInformer,
+	promInformer informers.PrometheusInformer,
 	conf Config) *Controller {
 
 	controller := &Controller{
 		monitclientset: monitclientset,
 		smonsLister:    smonInformer.Lister(),
+		promsLister:    promInformer.Lister(),
 		smonsSynced:    smonInformer.Informer().HasSynced,
-		config:         conf,
+		promsSynced:    promInformer.Informer().HasSynced,
+		cfg:            conf,
 		workqueue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ServiceMonitors"),
 	}
 
@@ -107,7 +116,10 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 	// Wait for the caches to be synced before starting workers
 	klog.Info("Waiting for informer caches to sync")
 	if ok := cache.WaitForCacheSync(stopCh, c.smonsSynced); !ok {
-		return fmt.Errorf("failed to wait for caches to sync")
+		return fmt.Errorf("failed to wait for servicemonitors caches to sync")
+	}
+	if ok := cache.WaitForCacheSync(stopCh, c.promsSynced); !ok {
+		return fmt.Errorf("failed to wait for prometheuses caches to sync")
 	}
 
 	klog.Info("Starting workers")
@@ -186,6 +198,7 @@ func (c *Controller) processNextWorkItem() bool {
 	return true
 }
 
+// TODO: add business logic here
 // syncHandler compares the actual state with the desired, and attempts to
 // converge the two. It then updates the Status block of the ServiceMonitor resource
 // with the current status of the resource.
@@ -199,7 +212,6 @@ func (c *Controller) syncHandler(key string) error {
 
 	// Get the ServiceMonitor resource with this namespace/name
 	smon, err := c.smonsLister.ServiceMonitors(namespace).Get(name)
-	// The ServiceMonitor resource may no longer exist, in which case we remove it from Prometheus.
 	if err != nil {
 		// The ServiceMonitor resource may no longer exist, in which case we stop processing.
 		if errors.IsNotFound(err) {
@@ -209,8 +221,23 @@ func (c *Controller) syncHandler(key string) error {
 
 		return err
 	}
+	// Get the label value of the ServiceMonitor resource. The label key is specified in the flag servicemonitor-label
+	v, ok := smon.Labels[c.cfg.ServiceMonitorLabel]
+	if !ok {
+		klog.Warningf("The ServiceMonitor '%s' doesn't contain label %s", key, c.cfg.ServiceMonitorLabel)
+		return nil
+	}
+	// Get the Prometheus resource with this namespace/name
+	prom, err := c.promsLister.Prometheuses(c.cfg.PrometheusNamespace).Get(c.cfg.Prometheus)
+	if err != nil {
+		// The Prometheus resource may no longer exist, in which case we stop processing.
+		if errors.IsNotFound(err) {
+			utilruntime.HandleError(fmt.Errorf("prometheus '%s/%s' is not found", c.cfg.PrometheusNamespace, c.cfg.Prometheus))
+			return nil
+		}
 
-	// TODO: add business logic here
+		return err
+	}
 
 	// Use finalizers to implement asynchronous pre-delete hooks
 	if smon.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -230,7 +257,69 @@ func (c *Controller) syncHandler(key string) error {
 			if _, err := c.monitclientset.MonitoringV1().ServiceMonitors(namespace).Update(smon); err != nil {
 				return err
 			}
+
+			for i, exp := range prom.Spec.ServiceMonitorSelector.MatchExpressions {
+				if exp.Key == c.cfg.ServiceMonitorLabel && exp.Operator == metav1.LabelSelectorOpIn {
+					prom.Spec.ServiceMonitorSelector.MatchExpressions[i].Values = util.RemoveString(prom.Spec.ServiceMonitorSelector.MatchExpressions[i].Values, v)
+					// Update prometheus via patch
+					payloadBytes, err := json.Marshal(prom)
+					if err != nil {
+						return err
+					}
+					_, err = c.monitclientset.MonitoringV1().Prometheuses(prom.Namespace).Patch(prom.Name, types.MergePatchType, payloadBytes)
+					if err != nil {
+						return err
+					}
+					break
+				}
+			}
+
+			return nil
 		}
+	}
+
+	// Set namespace label requirements for ServiceMonitorNamespaceSelector
+	smonNamespaceSelector := metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      c.cfg.ServiceMonitorNamespaceLabel,
+				Operator: metav1.LabelSelectorOpExists,
+			},
+		},
+	}
+	if !reflect.DeepEqual(prom.Spec.ServiceMonitorNamespaceSelector.MatchExpressions, smonNamespaceSelector.MatchExpressions) {
+		prom.Spec.ServiceMonitorNamespaceSelector.MatchExpressions = smonNamespaceSelector.MatchExpressions
+		prom.Spec.ServiceMonitorNamespaceSelector.MatchLabels = nil
+	}
+
+	// Bound the specific ServiceMonitor resource to Prometheus via ServiceMonitorSelector
+	for i, exp := range prom.Spec.ServiceMonitorSelector.MatchExpressions {
+		if exp.Key == c.cfg.ServiceMonitorLabel && exp.Operator == metav1.LabelSelectorOpIn {
+			prom.Spec.ServiceMonitorSelector.MatchExpressions[i].Values = util.AppendIfUnique(prom.Spec.ServiceMonitorSelector.MatchExpressions[i].Values, v)
+			break
+		}
+
+		if i == len(prom.Spec.ServiceMonitorSelector.MatchExpressions) {
+			prom.Spec.ServiceMonitorSelector.MatchExpressions = metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      c.cfg.ServiceMonitorLabel,
+						Operator: metav1.LabelSelectorOpIn,
+						Values:   []string{v},
+					},
+				},
+			}.MatchExpressions
+		}
+	}
+
+	// Update prometheus via patch
+	payloadBytes, err := json.Marshal(prom)
+	if err != nil {
+		return err
+	}
+	_, err = c.monitclientset.MonitoringV1().Prometheuses(prom.Namespace).Patch(prom.Name, types.MergePatchType, payloadBytes)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -253,7 +342,7 @@ func (c *Controller) enqueueServiceMonitor(obj interface{}) {
 		utilruntime.HandleError(err)
 		return
 	}
-	if util.ContainsString(c.config.IgnoredNamespaces, namespace) {
+	if util.ContainsString(c.cfg.IgnoredNamespaces, namespace) {
 		return
 	}
 
