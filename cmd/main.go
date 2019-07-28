@@ -62,7 +62,7 @@ func init() {
 	flagset.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	flagset.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	flagset.StringVar(&operatorCfg.Prometheus, "prometheus", "k8s-system", "The name of Prometheus resource to which ServiceMonitor resources are bound.")
-	flagset.StringVar(&operatorCfg.PrometheusNamespace, "prometheus-operator", "kubesphere-monitoring-system", "The namespace of Prometheus resource.")
+	flagset.StringVar(&operatorCfg.PrometheusNamespace, "prometheus-namespace", "kubesphere-monitoring-system", "The namespace of Prometheus resource.")
 	flagset.Var(&ignoredNs, "ignored-namespaces", "Ignore ServiceMonitor resources in specified namespaces.")
 	flagset.StringVar(&operatorCfg.ServiceMonitorLabel, "servicemonitor-label", "k8s-app", "The label key that must match the field serviceMonitorSelector of Prometheus resources.")
 	flagset.StringVar(&operatorCfg.ServiceMonitorNamespaceLabel, "servicemonitor-namespace-label", "kubesphere.io/workspace", "The label key of ServiceMonitor's namespace.")
